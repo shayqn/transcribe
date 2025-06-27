@@ -1,194 +1,154 @@
 import os
 import sys
-import tempfile
 import json
-import time
+import tempfile
+import argparse
+import logging
+from datetime import timedelta
+
 import torch
 import torchaudio
-import numpy as np
 import ffmpeg
+import numpy as np
+from tqdm import tqdm
 from faster_whisper import WhisperModel
 from pyannote.audio import Pipeline
 from speechbrain.inference import SpeakerRecognition
 from sklearn.cluster import AgglomerativeClustering
-from datetime import timedelta
 
-# ------------ Configurable parameters ------------
-HF_AUTH_TOKEN = "hugging-face-token"  # Set your huggingface token here or env var
+# ------------------------
+# Logging setup
+# ------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
+HF_AUTH_TOKEN = os.getenv("HF_AUTH_TOKEN")
 
+# ------------------------
+# Utility Functions
+# ------------------------
 def get_user_inputs():
     model_size = input("Choose whisper model size (tiny, base, small, medium, large): ").strip()
     num_speakers = input("Enter number of speakers (or press Enter to skip): ").strip()
     num_speakers = int(num_speakers) if num_speakers else None
     return model_size, num_speakers
 
+def format_timestamp(seconds):
+    td = timedelta(seconds=seconds)
+    return str(td).split(".")[0]
 
-def extract_audio(input_path, output_wav_path):
-    print("[1/6] Extracting audio from video/audio...")
+# ------------------------
+# Core Pipeline Functions
+# ------------------------
+def extract_audio(input_path, output_path, force=False):
+    if os.path.exists(output_path) and not force:
+        logger.info("[1/6] Skipping audio extraction (already exists)")
+        return
+    logger.info("[1/6] Extracting audio from input file...")
     (
-        ffmpeg
-        .input(input_path)
-        .output(output_wav_path, format='wav', ac=1, ar='16000')
+        ffmpeg.input(input_path)
+        .output(output_path, format='wav', ac=1, ar='16000')
         .overwrite_output()
         .run(quiet=True)
     )
-    print(f"    Audio saved to: {output_wav_path}")
+    logger.info(f"    Audio saved to: {output_path}")
 
-
-def transcribe_audio(audio_path, model_size="small"):
-    print("[2/6] Transcribing audio with Faster-Whisper...")
+def transcribe_audio(audio_path, model_size, output_path, force=False):
+    if os.path.exists(output_path) and not force:
+        logger.info("[2/6] Skipping transcription (already exists)")
+        return output_path
+    logger.info("[2/6] Transcribing audio with Faster-Whisper...")
     model = WhisperModel(model_size, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(audio_path, beam_size=5)
-    segments_list = []
-    for segment in segments:
-        segments_list.append({
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text.strip()
-        })
+    segments, _ = model.transcribe(audio_path, beam_size=5)
+    data = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
+    with open(output_path, "w") as f:
+        json.dump({"segments": data}, f, indent=2)
+    logger.info(f"    Transcript saved to: {output_path}")
+    return output_path
 
-    transcript_json_path = audio_path + f".{model_size}.json"
-    with open(transcript_json_path, "w") as f:
-        json.dump({"segments": segments_list}, f, indent=2)
-    print(f"    Transcript JSON saved: {transcript_json_path}")
-    return transcript_json_path
+def diarize_audio(audio_path, diar_path, force=False):
+    if os.path.exists(diar_path) and not force:
+        logger.info("[3/6] Skipping diarization (already exists)")
+        return diar_path
+    logger.info("[3/6] Running diarization with pyannote.audio...")
+    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization@2.1", use_auth_token=HF_AUTH_TOKEN)
+    diarization = pipeline(audio_path)
+    with open(diar_path, "w") as f:
+        diarization.write_rttm(f)
+    logger.info(f"    Diarization RTTM saved to: {diar_path}")
+    return diar_path
 
-
-def diarize_audio(audio_path, num_speakers=None):
-    print("[3/6] Running pyannote.audio diarization pipeline...")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization@2.1",
-        use_auth_token=HF_AUTH_TOKEN
-    )
-    diarization_result = pipeline(audio_path)
-    print(f"    Diarization finished, found {len(diarization_result)} speech turns")
-    return diarization_result
-
-
-def embed_and_cluster_segments(diarization_result, audio_path, num_speakers=None):
-    print("[4/6] Extracting speaker embeddings and clustering...")
-
-    speaker_model = SpeakerRecognition.from_hparams(
+def embed_and_cluster_segments(audio_path, diarization, num_speakers):
+    logger.info("[4/6] Embedding and clustering segments with SpeechBrain...")
+    recog = SpeakerRecognition.from_hparams(
         source="speechbrain/spkrec-ecapa-voxceleb",
         savedir="models/spkrec-ecapa-voxceleb",
-        run_opts={"device": "cpu"}
+        run_opts={"device": "cpu"},
     )
+    waveform, sr = torchaudio.load(audio_path)
+    embeddings = []
+    times = []
+    for turn, _, _ in tqdm(diarization.itertracks(yield_label=True), desc="Embedding segments"):
+        start, end = int(turn.start * sr), int(turn.end * sr)
+        segment = waveform[:, start:end]
+        try:
+            emb = recog.encode_batch(segment).squeeze(0).cpu().numpy()
+            embeddings.append(emb)
+            times.append((turn.start, turn.end))
+        except Exception as e:
+            logger.warning(f"Failed to embed segment {turn}: {e}")
+    if len(embeddings) < 2:
+        raise ValueError("Need at least two valid embeddings for clustering.")
+    X = np.vstack(embeddings)
+    clusterer = AgglomerativeClustering(n_clusters=num_speakers) if num_speakers else AgglomerativeClustering(n_clusters=None, distance_threshold=0.6)
+    labels = clusterer.fit_predict(X)
+    return [{"start": s, "end": e, "speaker": f"Speaker {l}"} for (s, e), l in zip(times, labels)]
 
-    waveform, sample_rate = torchaudio.load(audio_path)
-
-    segment_embeddings = []
-    segment_times = []
-
-    for turn, _, speaker in diarization_result.itertracks(yield_label=True):
-        start_frame = int(turn.start * sample_rate)
-        end_frame = int(turn.end * sample_rate)
-        segment_waveform = waveform[:, start_frame:end_frame]
-
-        embedding = speaker_model.encode_batch(segment_waveform).squeeze(0).cpu().numpy()
-        segment_embeddings.append(embedding)
-        segment_times.append((turn.start, turn.end))
-
-    embeddings_matrix = np.vstack(segment_embeddings)
-    print(f"    Extracted {embeddings_matrix.shape[0]} segment embeddings of dim {embeddings_matrix.shape[1]}")
-
-    if num_speakers is None:
-        print("    Number of speakers not specified, using distance threshold clustering")
-        clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=0.6).fit(embeddings_matrix)
-    else:
-        print(f"    Number of speakers specified: {num_speakers}, clustering into fixed clusters")
-        clustering = AgglomerativeClustering(n_clusters=num_speakers).fit(embeddings_matrix)
-
-    labels = clustering.labels_
-    print(f"    Clustering assigned {len(set(labels))} speakers")
-
-    labeled_segments = []
-    for idx, (start, end) in enumerate(segment_times):
-        labeled_segments.append({
-            "start": start,
-            "end": end,
-            "speaker": f"Speaker {labels[idx]}"
-        })
-
-    return labeled_segments
-
-
-def get_speaker_for_time(labeled_segments, t):
-    for seg in labeled_segments:
-        if seg["start"] <= t <= seg["end"]:
-            return seg["speaker"]
-    return "Unknown"
-
-
-def format_timestamp(seconds):
-    td = timedelta(seconds=seconds)
-    total_seconds = int(td.total_seconds())
-    h = total_seconds // 3600
-    m = (total_seconds % 3600) // 60
-    s = total_seconds % 60
-    return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-def merge_transcript_with_speakers(transcript_json_path, labeled_segments, output_txt_path):
-    print("[5/6] Merging transcript with speaker labels...")
-
-    with open(transcript_json_path, "r") as f:
+def merge_transcript(transcript_path, labeled_segments, out_path):
+    logger.info("[5/6] Merging transcript with speaker labels...")
+    with open(transcript_path) as f:
         data = json.load(f)
-    segments = data.get("segments", [])
+    result = []
+    for seg in data["segments"]:
+        t = (seg["start"] + seg["end"]) / 2
+        speaker = next((s["speaker"] for s in labeled_segments if s["start"] <= t <= s["end"]), "Unknown")
+        result.append(f"[{format_timestamp(seg['start'])}] {speaker}: {seg['text']}")
+    with open(out_path, "w") as f:
+        f.write("\n".join(result))
+    logger.info(f"    Final transcript written to {out_path}")
 
-    merged = []
-    for seg in segments:
-        midpoint = (seg["start"] + seg["end"]) / 2
-        speaker = get_speaker_for_time(labeled_segments, midpoint)
-        merged.append({
-            "start": seg["start"],
-            "end": seg["end"],
-            "speaker": speaker,
-            "text": seg["text"]
-        })
-
-    with open(output_txt_path, "w") as out_file:
-        out_file.write("Transcript with speaker labels\n\n")
-        for seg in merged:
-            ts = format_timestamp(seg["start"])
-            out_file.write(f"[{ts}] {seg['speaker']}: {seg['text']}\n")
-
-    print(f"    Transcript with speaker labels saved to {output_txt_path}")
-
-
-def main(input_path, output_dir, model_size="small", num_speakers=None):
-    start_time = time.perf_counter()
-
+# ------------------------
+# Main Entrypoint
+# ------------------------
+def main(input_path, output_dir, model_size, num_speakers, force=False):
     os.makedirs(output_dir, exist_ok=True)
+    tmp_wav = os.path.join(tempfile.gettempdir(), "audio.wav")
+    transcript_json = os.path.join(output_dir, f"transcript.{model_size}.json")
+    diar_rttm = os.path.join(output_dir, "diarization.rttm")
+    final_txt = os.path.join(output_dir, "final_transcript.txt")
 
-    tmp_wav_path = os.path.join(tempfile.gettempdir(), "audio.wav")
+    extract_audio(input_path, tmp_wav, force=force)
+    transcribe_audio(tmp_wav, model_size, transcript_json, force=force)
+    diarize_audio(tmp_wav, diar_rttm, force=force)
 
-    extract_audio(input_path, tmp_wav_path)
+    from pyannote.core import Annotation
+    diarization = Annotation()
+    with open(diar_rttm) as f:
+        diarization.load_rttm(f)
 
-    transcript_json_path = transcribe_audio(tmp_wav_path, model_size=model_size)
-
-    diarization_result = diarize_audio(tmp_wav_path, num_speakers=num_speakers)
-
-    labeled_segments = embed_and_cluster_segments(diarization_result, tmp_wav_path, num_speakers=num_speakers)
-
-    output_txt_path = os.path.join(output_dir, "final_transcript.txt")
-    merge_transcript_with_speakers(transcript_json_path, labeled_segments, output_txt_path)
-
-    end_time = time.perf_counter()
-    elapsed = end_time - start_time
-    print(f"[6/6] All done! Total elapsed time: {elapsed:.1f} seconds")
-
+    labeled = embed_and_cluster_segments(tmp_wav, diarization, num_speakers)
+    merge_transcript(transcript_json, labeled, final_txt)
+    logger.info("[6/6] Pipeline complete.")
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Full transcription + diarization pipeline with consistent speaker labeling")
-    parser.add_argument("input_path", help="Path to input audio or video file (mp4/m4a/wav)")
-    parser.add_argument("output_dir", help="Directory to save outputs")
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_path", help="Input MP4/M4A/WAV file")
+    parser.add_argument("output_dir", help="Output directory")
+    parser.add_argument("--force", action="store_true", help="Force overwrite of intermediate outputs")
     args = parser.parse_args()
-
-    print("Welcome to the transcription pipeline!")
     model_size, num_speakers = get_user_inputs()
-
-    main(args.input_path, args.output_dir, model_size=model_size, num_speakers=num_speakers)
+    main(args.input_path, args.output_dir, model_size, num_speakers, force=args.force)

@@ -64,11 +64,29 @@ You will be prompted to choose:
 - Number of speakers
 - Language (English is assumed)
 
-**Example:**
+** Basic Example:**
 ```bash
 python transcribe-meeting.py meeting.m4a --output_dir output/
 ```
 
+### Arguments
+| Argument         | Description                                                             |
+| ---------------- | ----------------------------------------------------------------------- |
+| `input_file`     | (positional) Path to input audio or video file (`.mp4`, `.m4a`, `.wav`) |
+| `--output_dir`   | Directory where output files will be saved                              |
+| `--model`        | Whisper model to use (`tiny`, `base`, `small`, `medium`, `large`)       |
+| `--num_speakers` | Number of speakers to use for diarization (integer > 1)                 |
+| `--language`     | Language code for transcription (e.g., `en` for English)                |
+
+
+**Example with optional arguments:**
+```bash
+python transcribe-meeting.py recordings/meeting.mp4 \
+  --output_dir transcripts/ \
+  --model small \
+  --num_speakers 2 \
+  --language en
+```
 ---
 
 ## Outputs

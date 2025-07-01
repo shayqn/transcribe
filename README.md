@@ -1,8 +1,8 @@
-#Transcribe Meeting
+# Transcribe Meeting
 
 A local Python script to transcribe and diarize meetings from video/audio files. This tool uses **Faster-Whisper** for fast transcription and **SpeechBrain** for speaker diarization. It outputs clean, timestamped text and a structured JSON file for easy review, summarization, or integration with LLMs.
 
-##Features
+## Features
 
 - Converts `.mp4`, `.m4a`, or `.wav` meeting recordings to text
 - Diarizes speakers using unsupervised clustering
@@ -17,7 +17,7 @@ A local Python script to transcribe and diarize meetings from video/audio files.
 
 ---
 
-##Setup Instructions
+## Setup Instructions
 
 ### 1. Clone the Repository
 

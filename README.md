@@ -1,6 +1,6 @@
 # Transcribe Meeting
 
-A local Python script to transcribe and diarize meetings from video/audio files. This tool uses **Faster-Whisper** for fast transcription and **SpeechBrain** for speaker diarization. It outputs clean, timestamped text and a structured JSON file for easy review, summarization, or integration with LLMs.
+A local Python script to transcribe and diarize meetings from video/audio files. This tool uses **Faster-Whisper** for fast transcription and **pyannote.audio** for speaker diarization. It outputs clean, timestamped text and a structured JSON file for easy review, summarization, or integration with LLMs.
 
 ## Features
 
@@ -41,7 +41,7 @@ pip install -r requirements.txt
 > ```txt
 > faster-whisper
 > torchaudio
-> speechbrain
+> pyannote.audio
 > pydub
 > ffmpeg-python
 > tqdm
@@ -87,7 +87,7 @@ After processing, the following files will appear in the output directory:
 
 1. **Audio Extraction**: Uses `ffmpeg` to extract audio if input is `.mp4`
 2. **Transcription**: Transcribes using `faster-whisper` (fast, quantized Whisper implementation)
-3. **Speaker Diarization**: Uses `SpeechBrain` to embed and cluster speaker segments
+3. **Speaker Diarization**: Uses `pyannote.audio` to embed and cluster speaker segments
 4. **Output Generation**: Writes `.txt` and `.json` outputs with timestamps and speaker labels
 
 ---
@@ -109,5 +109,5 @@ MIT License. See `LICENSE` file for details.
 ## Acknowledgements
 
 - [Faster-Whisper](https://github.com/guillaumekln/faster-whisper)
-- [SpeechBrain](https://speechbrain.readthedocs.io/)
+- [pyannote.audio](https://github.com/pyannote/pyannote-audio)
 - [ffmpeg](https://ffmpeg.org/)

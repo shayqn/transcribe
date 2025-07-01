@@ -64,7 +64,7 @@ You will be prompted to choose:
 - Number of speakers
 - Language (English is assumed)
 
-** Basic Example:**
+**Basic Example:**
 ```bash
 python transcribe-meeting.py meeting.m4a --output_dir output/
 ```

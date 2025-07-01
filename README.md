@@ -32,12 +32,9 @@ cd transcribe-meeting
 # Create a new environment
 conda create -n transcribe-meeting python=3.10 -y
 conda activate transcribe-meeting
-
-# Install required packages
-pip install -r requirements.txt
 ```
 
-> If `requirements.txt` doesn't exist yet, here's a typical one for this script:
+# Install required packages
 > ```txt
 > faster-whisper
 > torchaudio
